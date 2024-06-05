@@ -162,7 +162,10 @@ impl VkBevyInstance {
             .queue_family_index(queue_family_index as u32)
             .queue_priorities(&[1.0]);
 
-        let device_extension_names = vec![swapchain::NAME.as_ptr()];
+        let device_extension_names = vec![
+            swapchain::NAME.as_ptr(),
+            vk::KHR_BUFFER_DEVICE_ADDRESS_NAME.as_ptr(),
+        ];
 
         let mut physical_device_buffer_device_address_features =
             vk::PhysicalDeviceBufferDeviceAddressFeatures::default();
