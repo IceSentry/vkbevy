@@ -1,0 +1,17 @@
+[package]
+name = "vkbevy"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.86"
+ash = { version = "0.38.0", features = ["linked", "debug"] }
+ash-window = "0.13.0"
+bevy = { version = "0.13.2", default-features = false, features = [
+    "bevy_winit",
+] }
+bytemuck = "1.16.0"
+gpu-allocator = { git = "https://github.com/Traverse-Research/gpu-allocator", branch = "ash-0.38" }
+rspirv = "0.12.0"
+shaderc = "0.8.3"
+winit = "0.29.0"
