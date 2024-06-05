@@ -751,7 +751,6 @@ impl VkBevyInstance {
     }
 
     pub fn recreate_swapchain(&mut self, width: u32, height: u32) {
-        println!("recreate swap chain");
         let new_swapchain_khr = create_swapchain_khr(
             &self.swapchain_loader,
             &self.surface_loader,
@@ -801,14 +800,8 @@ impl VkBevyInstance {
         }
     }
 
-    pub fn create_pipeline_layout(
-        &mut self,
-        shaders: &[&Shader],
-    ) -> anyhow::Result<PipelineLayout> {
-        let set_layout = self.create_set_layout(shaders)?;
-
-        let create_info =
-            vk::PipelineLayoutCreateInfo::default().set_layouts(std::slice::from_ref(&set_layout));
+    pub fn create_pipeline_layout(&mut self) -> anyhow::Result<PipelineLayout> {
+        let create_info = vk::PipelineLayoutCreateInfo::default();
         let pipeline_layout = unsafe { self.device.create_pipeline_layout(&create_info, None)? };
 
         let vk_pipeline_layout = Arc::new(Mutex::new(pipeline_layout));
@@ -816,38 +809,72 @@ impl VkBevyInstance {
 
         Ok(PipelineLayout { vk_pipeline_layout })
     }
+}
 
-    fn create_set_layout(
-        &mut self,
-        shaders: &[&Shader],
-    ) -> anyhow::Result<vk::DescriptorSetLayout> {
-        let mut storage_mask = 0;
-        for shader in shaders {
-            storage_mask |= shader.storage_buffer_mask;
-        }
-        let mut bindings = vec![];
-        for i in 0..32 {
-            if storage_mask & (1 << i) > 0 {
-                let mut stage_flags = vk::ShaderStageFlags::empty();
-                for shader in shaders {
-                    if shader.storage_buffer_mask & (1 << i) > 0 {
-                        stage_flags |= shader.stage;
-                    }
-                }
-                bindings.push(
-                    vk::DescriptorSetLayoutBinding::default()
-                        .binding(i)
-                        .descriptor_count(1)
-                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                        .stage_flags(stage_flags),
-                );
+impl Drop for VkBevyInstance {
+    fn drop(&mut self) {
+        unsafe {
+            self.device.device_wait_idle().unwrap();
+
+            self.device.destroy_query_pool(self.query_pool, None);
+
+            self.device.destroy_command_pool(self.command_pool, None);
+
+            for buffer in &self.buffers {
+                let buffer = buffer.lock().unwrap();
+                self.device.destroy_buffer(*buffer, None);
             }
-        }
-        let create_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
-        Ok(unsafe {
+
+            for allocation in &self.allocations {
+                let allocation = allocation.lock().unwrap().take().unwrap();
+                self.allocator.free(allocation).unwrap();
+            }
+            // need to drop the allocator before the device gets destroyed
+            std::mem::ManuallyDrop::drop(&mut self.allocator);
+
+            self.destroy_swapchain();
+
+            for pipeline in &self.pipelines {
+                self.device
+                    .destroy_pipeline(*pipeline.lock().unwrap(), None);
+            }
+
+            for pipeline_layout in &self.pipeline_layouts {
+                self.device
+                    .destroy_pipeline_layout(*pipeline_layout.lock().unwrap(), None);
+            }
+
             self.device
-                .create_descriptor_set_layout(&create_info, None)?
-        })
+                .destroy_pipeline_cache(self.pipeline_cache, None);
+
+            for module in &self.shader_modules {
+                self.device
+                    .destroy_shader_module(*module.lock().unwrap(), None);
+            }
+
+            for image_view in &self.image_views {
+                self.device
+                    .destroy_image_view(*image_view.lock().unwrap(), None);
+            }
+
+            for image in &self.images {
+                self.device.destroy_image(*image.lock().unwrap(), None);
+            }
+
+            self.device.destroy_render_pass(self.render_pass, None);
+
+            self.device.destroy_semaphore(self.acquire_semaphore, None);
+            self.device.destroy_semaphore(self.release_semaphore, None);
+
+            self.device.destroy_device(None);
+
+            self.surface_loader.destroy_surface(self.surface, None);
+
+            self.debug_utils_loader
+                .destroy_debug_utils_messenger(self.debug_utils_messenger, None);
+
+            self.instance.destroy_instance(None);
+        }
     }
 }
 
@@ -1175,7 +1202,6 @@ fn create_frame_buffer(
     width: u32,
     height: u32,
 ) -> anyhow::Result<vk::Framebuffer> {
-    println!("create_frame_buffer {} {}", width, height);
     let create_info = vk::FramebufferCreateInfo::default()
         .render_pass(render_pass)
         .attachments(std::slice::from_ref(&image_view))

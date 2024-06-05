@@ -75,7 +75,7 @@ fn setup(
     };
 
     let pipeline_layout = vk_bevy
-        .create_pipeline_layout(&[&vertex_shader, &fragment_shader])
+        .create_pipeline_layout()
         .expect("Failed to create pipeline layout");
 
     let pipeline = vk_bevy
