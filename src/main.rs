@@ -154,6 +154,12 @@ fn update(
     let begin_frame = Instant::now();
 
     let mut window = windows.single_mut();
+    let width = window.physical_width();
+    let height = window.physical_height();
+    if width == 0 || height == 0 {
+        // If the window is minimized the width and height will be 0. Skip rendering in this case.
+        return;
+    }
 
     // BEGIN
 
@@ -187,8 +193,6 @@ fn update(
     // DRAW
     {
         // info!("draw");
-        let width = window.physical_width();
-        let height = window.physical_height();
 
         assert_eq!(width, vk_bevy.swapchain_width);
         assert_eq!(height, vk_bevy.swapchain_height);
@@ -241,6 +245,9 @@ fn resize(
         if let Ok(window) = windows.get(event.window) {
             let width = window.physical_width();
             let height = window.physical_height();
+            if width == 0 || height == 0 {
+                continue;
+            }
             if width != vk_bevy.swapchain_width || height != vk_bevy.swapchain_height {
                 // FIXME: this will break with multiple windows
                 vk_bevy.recreate_swapchain(width, height);
