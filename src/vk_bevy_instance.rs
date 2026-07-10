@@ -895,11 +895,10 @@ fn create_instance(
         .engine_version(0)
         .api_version(vk::make_api_version(0, 1, 1, 0));
 
-    let debug_layers_raw: Vec<*const c_char> =
-        [unsafe { CStr::from_bytes_with_nul_unchecked(b"VK_LAYER_KHRONOS_validation\0") }]
-            .iter()
-            .map(|raw_name: &&CStr| raw_name.as_ptr())
-            .collect();
+    // let debug_layers_raw: Vec<*const c_char> = [c"VK_LAYER_KHRONOS_validation"]
+    //     .iter()
+    //     .map(|raw_name: &&CStr| raw_name.as_ptr())
+    //     .collect();
 
     let mut extension_names =
         ash_window::enumerate_required_extensions(winit_window.display_handle()?.as_raw())?
@@ -911,7 +910,7 @@ fn create_instance(
     let create_info = vk::InstanceCreateInfo::default()
         .application_info(&app_info)
         .flags(vk::InstanceCreateFlags::default())
-        .enabled_layer_names(&debug_layers_raw)
+        // .enabled_layer_names(&debug_layers_raw)
         .enabled_extension_names(&extension_names);
 
     Ok(unsafe { entry.create_instance(&create_info, None)? })

@@ -4,11 +4,12 @@ use ash::vk::{self, PresentModeKHR};
 use bevy::{
     a11y::AccessibilityPlugin,
     app::AppExit,
+    ecs::system::NonSendMarker,
     input::InputPlugin,
     log::LogPlugin,
     prelude::*,
     window::{PrimaryWindow, WindowResized},
-    winit::{WinitPlugin, WinitWindows},
+    winit::{WinitPlugin, WinitWindows, WINIT_WINDOWS},
 };
 use mesh::{prepare_mesh, IndexBuffer, Mesh, Vertex, VertexBuffer};
 use vk_bevy_instance::{Pipeline, Program, VkBevyInstance};
@@ -39,9 +40,9 @@ fn main() {
         .run();
 }
 
-fn exit_on_esc(key_input: Res<ButtonInput<KeyCode>>, mut exit_events: EventWriter<AppExit>) {
+fn exit_on_esc(key_input: Res<ButtonInput<KeyCode>>, mut exit_events: MessageWriter<AppExit>) {
     if key_input.just_pressed(KeyCode::Escape) {
-        exit_events.send_default();
+        exit_events.write_default();
     }
 }
 
@@ -53,73 +54,76 @@ pub struct MeshProgram(pub Program);
 fn setup(
     mut commands: Commands,
     windows: Query<Entity, With<PrimaryWindow>>,
-    winit_windows: NonSendMut<WinitWindows>,
+    _marker: NonSendMarker,
 ) {
-    let winit_window = windows
-        .get_single()
-        .ok()
-        .and_then(|window_id| winit_windows.get_window(window_id))
-        .expect("Failed to get winit window");
+    WINIT_WINDOWS.with_borrow(|winit_windows| {
+        let winit_window = windows
+            .single()
+            .ok()
+            .and_then(|window_id| winit_windows.get_window(window_id))
+            .expect("Failed to get winit window");
 
-    let mut vk_bevy = VkBevyInstance::init(winit_window, PresentModeKHR::IMMEDIATE)
-        .expect("Failed to initialize VkBevyInstance");
+        let mut vk_bevy = VkBevyInstance::init(winit_window, PresentModeKHR::IMMEDIATE)
+            .expect("Failed to initialize VkBevyInstance");
 
-    let vertex_shader = vk_bevy.load_shader("assets/shaders/triangle.vert.glsl");
-    let fragment_shader = vk_bevy.load_shader("assets/shaders/triangle.frag.glsl");
+        let vertex_shader = vk_bevy.load_shader("assets/shaders/triangle.vert.glsl");
+        let fragment_shader = vk_bevy.load_shader("assets/shaders/triangle.frag.glsl");
 
-    let pipeline_rasterization_state_create_info = vk::PipelineRasterizationStateCreateInfo {
-        front_face: vk::FrontFace::COUNTER_CLOCKWISE,
-        line_width: 1.0,
-        polygon_mode: vk::PolygonMode::FILL,
-        ..Default::default()
-    };
+        let pipeline_rasterization_state_create_info = vk::PipelineRasterizationStateCreateInfo {
+            front_face: vk::FrontFace::COUNTER_CLOCKWISE,
+            line_width: 1.0,
+            polygon_mode: vk::PolygonMode::FILL,
+            ..Default::default()
+        };
 
-    let pipeline_layout = vk_bevy
-        .create_pipeline_layout()
-        .expect("Failed to create pipeline layout");
+        let pipeline_layout = vk_bevy
+            .create_pipeline_layout()
+            .expect("Failed to create pipeline layout");
 
-    let pipeline = vk_bevy
-        .create_graphics_pipeline(
-            &pipeline_layout,
-            vk_bevy.render_pass,
-            &[vertex_shader.create_info(), fragment_shader.create_info()],
-            vk::PrimitiveTopology::TRIANGLE_LIST,
-            pipeline_rasterization_state_create_info,
-            &[vk::VertexInputBindingDescription {
-                binding: 0,
-                stride: std::mem::size_of::<Vertex>() as u32,
-                input_rate: vk::VertexInputRate::VERTEX,
-            }],
-            &[
-                vk::VertexInputAttributeDescription {
-                    location: 0,
+        let pipeline = vk_bevy
+            .create_graphics_pipeline(
+                &pipeline_layout,
+                vk_bevy.render_pass,
+                &[vertex_shader.create_info(), fragment_shader.create_info()],
+                vk::PrimitiveTopology::TRIANGLE_LIST,
+                pipeline_rasterization_state_create_info,
+                &[vk::VertexInputBindingDescription {
                     binding: 0,
-                    format: vk::Format::R32G32B32A32_SFLOAT,
-                    offset: {
-                        unsafe {
-                            let b: Vertex = std::mem::zeroed();
-                            std::ptr::addr_of!(b.pos) as isize - std::ptr::addr_of!(b) as isize
-                        }
-                    } as u32,
-                },
-                vk::VertexInputAttributeDescription {
-                    location: 1,
-                    binding: 0,
-                    format: vk::Format::R32G32B32A32_SFLOAT,
-                    offset: {
-                        unsafe {
-                            let b: Vertex = std::mem::zeroed();
-                            std::ptr::addr_of!(b.color) as isize - std::ptr::addr_of!(b) as isize
-                        }
-                    } as u32,
-                },
-            ],
-        )
-        .expect("Failed to create graphics pipeline");
+                    stride: std::mem::size_of::<Vertex>() as u32,
+                    input_rate: vk::VertexInputRate::VERTEX,
+                }],
+                &[
+                    vk::VertexInputAttributeDescription {
+                        location: 0,
+                        binding: 0,
+                        format: vk::Format::R32G32B32A32_SFLOAT,
+                        offset: {
+                            unsafe {
+                                let b: Vertex = std::mem::zeroed();
+                                std::ptr::addr_of!(b.pos) as isize - std::ptr::addr_of!(b) as isize
+                            }
+                        } as u32,
+                    },
+                    vk::VertexInputAttributeDescription {
+                        location: 1,
+                        binding: 0,
+                        format: vk::Format::R32G32B32A32_SFLOAT,
+                        offset: {
+                            unsafe {
+                                let b: Vertex = std::mem::zeroed();
+                                std::ptr::addr_of!(b.color) as isize
+                                    - std::ptr::addr_of!(b) as isize
+                            }
+                        } as u32,
+                    },
+                ],
+            )
+            .expect("Failed to create graphics pipeline");
 
-    commands.insert_resource(MeshPipeline(pipeline));
+        commands.insert_resource(MeshPipeline(pipeline));
 
-    commands.insert_resource(vk_bevy);
+        commands.insert_resource(vk_bevy);
+    });
 }
 
 fn spawn_triangle_mesh(mut commands: Commands) {
@@ -153,7 +157,7 @@ fn update(
 ) {
     let begin_frame = Instant::now();
 
-    let mut window = windows.single_mut();
+    let mut window = windows.single_mut().unwrap();
     let width = window.physical_width();
     let height = window.physical_height();
     if width == 0 || height == 0 {
@@ -238,7 +242,7 @@ fn update(
 
 fn resize(
     windows: Query<&Window>,
-    mut events: EventReader<WindowResized>,
+    mut events: MessageReader<WindowResized>,
     mut vk_bevy: ResMut<VkBevyInstance>,
 ) {
     for event in events.read() {
