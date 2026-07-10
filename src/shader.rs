@@ -18,7 +18,7 @@ pub struct Shader {
 }
 
 impl Shader {
-    pub fn create_info(&self) -> vk::PipelineShaderStageCreateInfo {
+    pub fn create_info(&self) -> vk::PipelineShaderStageCreateInfo<'_> {
         vk::PipelineShaderStageCreateInfo::default()
             .stage(self.stage)
             .module(*self.vk_shader_module.lock().unwrap())

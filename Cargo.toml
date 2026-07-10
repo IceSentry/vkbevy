@@ -3,6 +3,9 @@ name = "vkbevy"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+trace = []
+
 [dependencies]
 anyhow = "1.0"
 ash = { version = "0.38.0", features = ["linked", "debug"] }

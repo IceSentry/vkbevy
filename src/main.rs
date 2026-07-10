@@ -9,7 +9,7 @@ use bevy::{
     log::LogPlugin,
     prelude::*,
     window::{PrimaryWindow, WindowResized},
-    winit::{WinitPlugin, WinitWindows, WINIT_WINDOWS},
+    winit::{WinitPlugin, WINIT_WINDOWS},
 };
 use mesh::{prepare_mesh, IndexBuffer, Mesh, Vertex, VertexBuffer};
 use vk_bevy_instance::{Pipeline, Program, VkBevyInstance};
