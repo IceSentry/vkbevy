@@ -5,7 +5,7 @@ use std::{
 };
 
 use crate::shader::{compile_shader, create_shader_module, parse_spirv, Shader};
-use anyhow::bail;
+use anyhow::{bail, Context};
 use ash::{
     ext::debug_utils,
     khr::{surface, swapchain},
@@ -89,6 +89,12 @@ impl Image {
     }
 }
 
+pub struct VkBevySurface {
+    pub loader: surface::Instance,
+    pub khr: vk::SurfaceKHR,
+    pub format: vk::SurfaceFormatKHR,
+}
+
 #[derive(Resource)]
 pub struct VkBevyInstance {
     pub instance: Instance,
@@ -104,15 +110,13 @@ pub struct VkBevyInstance {
     pub swapchain_height: u32,
     pub framebuffers: Vec<vk::Framebuffer>,
     pub present_mode: vk::PresentModeKHR,
-    pub surface_loader: surface::Instance,
-    pub surface: vk::SurfaceKHR,
-    pub surface_format: vk::SurfaceFormatKHR,
+    pub surface: VkBevySurface,
     pub acquire_semaphore: vk::Semaphore,
     pub release_semaphore: vk::Semaphore,
     pub present_queue: vk::Queue,
     pub command_pool: vk::CommandPool,
     pub command_buffers: Vec<vk::CommandBuffer>,
-    pub render_pass: vk::RenderPass,
+    pub render_passes: Vec<vk::RenderPass>,
     pub pipeline_cache: vk::PipelineCache,
     pipeline_layouts: Vec<Arc<Mutex<vk::PipelineLayout>>>,
     pipelines: Vec<Arc<Mutex<vk::Pipeline>>>,
@@ -133,24 +137,23 @@ impl VkBevyInstance {
         present_mode: vk::PresentModeKHR,
     ) -> anyhow::Result<Self> {
         let entry = Entry::linked();
-        let instance =
-            create_instance(&entry, "Cendre", winit_window).expect("Failed to create instance");
+        let instance = create_ash_instance(
+            &entry,
+            "VkBevyInstance",
+            winit_window,
+            &[
+                #[cfg(debug_assertions)]
+                c"VK_LAYER_KHRONOS_validation",
+            ],
+        )
+        .expect("Failed to create instance");
 
+        // Create the debug utils as soon as possible so it can warn about initiazliation errors
         let debug_utils_loader = debug_utils::Instance::new(&entry, &instance);
         let debug_utils_messenger = init_debug_utils_messenger(&debug_utils_loader)
             .expect("Failed to init debug utils messenger");
 
-        let surface = unsafe {
-            ash_window::create_surface(
-                &entry,
-                &instance,
-                winit_window.display_handle()?.as_raw(),
-                winit_window.window_handle()?.as_raw(),
-                None,
-            )
-            .expect("Failed to create surface")
-        };
-        let surface_loader = surface::Instance::new(&entry, &instance);
+        let (surface, surface_loader) = create_surface(&entry, &instance, winit_window)?;
 
         let (physical_device, queue_family_index) =
             select_physical_device(&instance, &surface_loader, surface).expect("No GPU found");
@@ -189,14 +192,17 @@ impl VkBevyInstance {
 
         info!("device created");
 
-        let surface_format = get_surface_format(&surface_loader, physical_device, surface)
-            .expect("Failed to get a surface format");
+        let vk_bevy_surface = {
+            let surface_format = get_surface_format(&surface_loader, physical_device, surface)
+                .expect("Failed to get a surface format");
+            VkBevySurface {
+                khr: surface,
+                format: surface_format,
+                loader: surface_loader,
+            }
+        };
 
-        info!("surface format: {surface_format:?}");
-
-        let render_pass = create_render_pass(&device, surface_format).unwrap();
-
-        info!("render pass created");
+        info!("surface format: {:?}", vk_bevy_surface.format);
 
         let swapchain_loader = swapchain::Device::new(&instance, &device);
 
@@ -205,9 +211,7 @@ impl VkBevyInstance {
 
         let swapchain_khr = create_swapchain_khr(
             &swapchain_loader,
-            &surface_loader,
-            surface,
-            surface_format,
+            &vk_bevy_surface,
             physical_device,
             swapchain_width,
             swapchain_height,
@@ -217,21 +221,18 @@ impl VkBevyInstance {
         .expect("Failed to create swapchain");
         info!("swapchain created");
 
-        let (swapchain_images, swapchain_image_views, framebuffers) = create_swapchain_resources(
+        let (swapchain_images, swapchain_image_views) = create_swapchain_resources(
             &device,
             &swapchain_loader,
             swapchain_khr,
-            render_pass,
-            surface_format,
-            swapchain_width,
-            swapchain_height,
+            vk_bevy_surface.format,
         );
         info!("swapchain resources created");
 
         let create_info = vk::QueryPoolCreateInfo::default()
             .query_type(vk::QueryType::TIMESTAMP)
             .query_count(128);
-        let query_pool = unsafe { device.create_query_pool(&create_info, None).unwrap() };
+        let query_pool = unsafe { device.create_query_pool(&create_info, None)? };
 
         let command_pool = create_command_pool(&device, queue_family_index as u32);
 
@@ -239,14 +240,14 @@ impl VkBevyInstance {
             .command_pool(command_pool)
             .level(vk::CommandBufferLevel::PRIMARY)
             .command_buffer_count(1);
-        let command_buffers = unsafe { device.allocate_command_buffers(&allocate_info).unwrap() };
+        let command_buffers = unsafe { device.allocate_command_buffers(&allocate_info)? };
 
-        let acquire_semaphore = create_semaphore(&device).expect("Failed to create semaphore");
-        let release_semaphore = create_semaphore(&device).expect("Failed to create semaphore");
+        let acquire_semaphore = create_semaphore(&device)?;
+        let release_semaphore = create_semaphore(&device)?;
         let present_queue = unsafe { device.get_device_queue(queue_family_index as u32, 0) };
 
         let create_info = vk::PipelineCacheCreateInfo::default();
-        let pipeline_cache = unsafe { device.create_pipeline_cache(&create_info, None).unwrap() };
+        let pipeline_cache = unsafe { device.create_pipeline_cache(&create_info, None)? };
 
         let buffer_device_address =
             physical_device_buffer_device_address_features.buffer_device_address == 1;
@@ -257,8 +258,21 @@ impl VkBevyInstance {
             debug_settings: default(),
             buffer_device_address,
             allocation_sizes: default(),
-        })
-        .unwrap();
+        })?;
+
+        // // TODO move out of init
+        // let render_pass = create_render_pass(&device, vk_bevy_surface.format)?;
+
+        // info!("render pass created");
+
+        // // TODO move out of init
+        // let framebuffers = create_framebuffers(
+        //     &swapchain_image_views,
+        //     &device,
+        //     render_pass,
+        //     swapchain_width,
+        //     swapchain_height,
+        // );
 
         Ok(Self {
             instance,
@@ -272,17 +286,15 @@ impl VkBevyInstance {
             swapchain_image_views,
             swapchain_width,
             swapchain_height,
-            framebuffers,
+            framebuffers: vec![],
             present_mode,
-            surface_loader,
-            surface,
-            surface_format,
+            surface: vk_bevy_surface,
             acquire_semaphore,
             release_semaphore,
             present_queue,
             command_pool,
             command_buffers,
-            render_pass,
+            render_passes: vec![],
             pipeline_cache,
             pipeline_layouts: vec![],
             pipelines: vec![],
@@ -345,7 +357,7 @@ impl VkBevyInstance {
         unsafe {
             self.device
                 .reset_command_pool(self.command_pool, vk::CommandPoolResetFlags::empty())
-                .expect("Failed to reset command_pool");
+                .expect("Failed to reset command pool");
         }
 
         unsafe {
@@ -353,7 +365,7 @@ impl VkBevyInstance {
                 .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
             self.device
                 .begin_command_buffer(command_buffer, &begin_info)
-                .unwrap();
+                .expect("Failed to begin command buffer");
         }
 
         let region = vk::BufferCopy::default()
@@ -610,6 +622,7 @@ impl VkBevyInstance {
         }
     }
 
+    /// Returns the frame time in ms
     #[must_use]
     pub fn get_frame_time(&self) -> (f64, f64) {
         let mut data: [i64; 2] = [0, 0];
@@ -756,9 +769,7 @@ impl VkBevyInstance {
     pub fn recreate_swapchain(&mut self, width: u32, height: u32) {
         let new_swapchain_khr = create_swapchain_khr(
             &self.swapchain_loader,
-            &self.surface_loader,
-            self.surface,
-            self.surface_format,
+            &self.surface,
             self.physical_device,
             width,
             height,
@@ -766,14 +777,11 @@ impl VkBevyInstance {
             self.present_mode,
         )
         .expect("Failed to create swapchain");
-        let (swapchain_images, swapchain_image_views, framebuffers) = create_swapchain_resources(
+        let (swapchain_images, swapchain_image_views) = create_swapchain_resources(
             &self.device,
             &self.swapchain_loader,
             new_swapchain_khr,
-            self.render_pass,
-            self.surface_format,
-            width,
-            height,
+            self.surface.format,
         );
 
         unsafe { self.device.device_wait_idle().unwrap() };
@@ -785,7 +793,62 @@ impl VkBevyInstance {
         self.swapchain_khr = new_swapchain_khr;
         self.swapchain_images = swapchain_images;
         self.swapchain_image_views = swapchain_image_views;
-        self.framebuffers = framebuffers;
+    }
+
+    /// WARN this needs to be called after `recreate_swapchain`
+    pub fn create_framebuffers(&mut self, render_pass: vk::RenderPass) {
+        self.framebuffers = {
+            let swapchain_image_views: &[vk::ImageView] = &self.swapchain_image_views;
+            let device = &self.device;
+            let width = self.swapchain_width;
+            let height = self.swapchain_height;
+            let mut framebuffers = vec![];
+            for image_view in swapchain_image_views {
+                let fb = create_framebuffer(device, render_pass, image_view, width, height)
+                    .expect("Failed to create frame buffer");
+                framebuffers.push(fb);
+            }
+            framebuffers
+        };
+    }
+
+    // TODO pass descriptor
+    pub fn create_render_pass(&mut self) -> Result<vk::RenderPass, anyhow::Error> {
+        let device = &self.device;
+        let surface_format = self.surface.format;
+        let dependencies = [vk::SubpassDependency {
+            src_subpass: vk::SUBPASS_EXTERNAL,
+            src_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+            dst_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_READ
+                | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+            dst_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+            ..Default::default()
+        }];
+        let color_attachment_refs = [vk::AttachmentReference {
+            attachment: 0,
+            layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+        }];
+        let subpass = vk::SubpassDescription::default()
+            .color_attachments(&color_attachment_refs)
+            .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS);
+
+        let attachment = vk::AttachmentDescription::default()
+            .format(surface_format.format)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .load_op(vk::AttachmentLoadOp::CLEAR)
+            .store_op(vk::AttachmentStoreOp::STORE)
+            .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+            .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+            .initial_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+            .final_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+        let create_info = vk::RenderPassCreateInfo::default()
+            .attachments(std::slice::from_ref(&attachment))
+            .subpasses(std::slice::from_ref(&subpass))
+            .dependencies(&dependencies);
+        let rp = unsafe { device.create_render_pass(&create_info, None)? };
+
+        self.render_passes.push(rp);
+        Ok(rp)
     }
 
     fn destroy_swapchain(&mut self) {
@@ -864,14 +927,16 @@ impl Drop for VkBevyInstance {
                 self.device.destroy_image(*image.lock().unwrap(), None);
             }
 
-            self.device.destroy_render_pass(self.render_pass, None);
+            for rp in &self.render_passes {
+                self.device.destroy_render_pass(*rp, None);
+            }
 
             self.device.destroy_semaphore(self.acquire_semaphore, None);
             self.device.destroy_semaphore(self.release_semaphore, None);
 
             self.device.destroy_device(None);
 
-            self.surface_loader.destroy_surface(self.surface, None);
+            self.surface.loader.destroy_surface(self.surface.khr, None);
 
             self.debug_utils_loader
                 .destroy_debug_utils_messenger(self.debug_utils_messenger, None);
@@ -881,10 +946,11 @@ impl Drop for VkBevyInstance {
     }
 }
 
-fn create_instance(
+fn create_ash_instance(
     entry: &Entry,
     app_name: &str,
     winit_window: &winit::window::Window,
+    layer_names: &[&CStr],
 ) -> anyhow::Result<ash::Instance> {
     let app_name = CString::new(app_name.to_string())?;
 
@@ -893,12 +959,12 @@ fn create_instance(
         .application_version(0)
         .engine_name(&app_name)
         .engine_version(0)
-        .api_version(vk::make_api_version(0, 1, 1, 0));
+        .api_version(vk::make_api_version(0, 1, 3, 0));
 
-    // let debug_layers_raw: Vec<*const c_char> = [c"VK_LAYER_KHRONOS_validation"]
-    //     .iter()
-    //     .map(|raw_name: &&CStr| raw_name.as_ptr())
-    //     .collect();
+    let layer_names_raw: Vec<*const c_char> = layer_names
+        .iter()
+        .map(|raw_name| raw_name.as_ptr())
+        .collect();
 
     let mut extension_names =
         ash_window::enumerate_required_extensions(winit_window.display_handle()?.as_raw())?
@@ -910,10 +976,29 @@ fn create_instance(
     let create_info = vk::InstanceCreateInfo::default()
         .application_info(&app_info)
         .flags(vk::InstanceCreateFlags::default())
-        // .enabled_layer_names(&debug_layers_raw)
+        .enabled_layer_names(&layer_names_raw)
         .enabled_extension_names(&extension_names);
 
     Ok(unsafe { entry.create_instance(&create_info, None)? })
+}
+
+fn create_surface(
+    entry: &Entry,
+    instance: &ash::Instance,
+    winit_window: &winit::window::Window,
+) -> anyhow::Result<(ash::vk::SurfaceKHR, ash::khr::surface::Instance)> {
+    let surface = unsafe {
+        ash_window::create_surface(
+            entry,
+            instance,
+            winit_window.display_handle()?.as_raw(),
+            winit_window.window_handle()?.as_raw(),
+            None,
+        )
+        .expect("Failed to create surface")
+    };
+    let surface_loader = surface::Instance::new(entry, instance);
+    Ok((surface, surface_loader))
 }
 
 unsafe extern "system" fn vulkan_debug_callback(
@@ -946,7 +1031,8 @@ unsafe extern "system" fn vulkan_debug_callback(
         vk::DebugUtilsMessageSeverityFlagsEXT::WARNING => warn!("{message_format}"),
         vk::DebugUtilsMessageSeverityFlagsEXT::ERROR => {
             error!("{message_format}");
-            panic!("VULKAN VALIDATION ERROR");
+            // panic!("VULKAN VALIDATION ERROR");
+            std::process::exit(0);
         }
         _ => panic!("Unknown message severity"),
     }
@@ -1012,7 +1098,7 @@ fn select_physical_device(
     for physical_device in &physical_devices {
         let props = unsafe { instance.get_physical_device_properties(*physical_device) };
 
-        if props.api_version < vk::API_VERSION_1_1 {
+        if props.api_version < vk::API_VERSION_1_3 {
             continue;
         }
 
@@ -1058,48 +1144,10 @@ fn get_surface_format(
     }
 }
 
-fn create_render_pass(
-    device: &Device,
-    surface_format: vk::SurfaceFormatKHR,
-) -> anyhow::Result<vk::RenderPass> {
-    let dependencies = [vk::SubpassDependency {
-        src_subpass: vk::SUBPASS_EXTERNAL,
-        src_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-        dst_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_READ
-            | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
-        dst_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-        ..Default::default()
-    }];
-    let color_attachment_refs = [vk::AttachmentReference {
-        attachment: 0,
-        layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-    }];
-    let subpass = vk::SubpassDescription::default()
-        .color_attachments(&color_attachment_refs)
-        .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS);
-
-    let attachment = vk::AttachmentDescription::default()
-        .format(surface_format.format)
-        .samples(vk::SampleCountFlags::TYPE_1)
-        .load_op(vk::AttachmentLoadOp::CLEAR)
-        .store_op(vk::AttachmentStoreOp::STORE)
-        .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
-        .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
-        .initial_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-        .final_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
-    let create_info = vk::RenderPassCreateInfo::default()
-        .attachments(std::slice::from_ref(&attachment))
-        .subpasses(std::slice::from_ref(&subpass))
-        .dependencies(&dependencies);
-    Ok(unsafe { device.create_render_pass(&create_info, None)? })
-}
-
 #[allow(clippy::too_many_arguments)]
 fn create_swapchain_khr(
     swapchain_loader: &swapchain::Device,
-    surface_loader: &surface::Instance,
-    surface: vk::SurfaceKHR,
-    surface_format: vk::SurfaceFormatKHR,
+    surface: &VkBevySurface,
     physical_device: vk::PhysicalDevice,
     width: u32,
     height: u32,
@@ -1107,7 +1155,9 @@ fn create_swapchain_khr(
     present_mode: vk::PresentModeKHR,
 ) -> anyhow::Result<vk::SwapchainKHR> {
     let surface_capabilities = unsafe {
-        surface_loader.get_physical_device_surface_capabilities(physical_device, surface)?
+        surface
+            .loader
+            .get_physical_device_surface_capabilities(physical_device, surface.khr)?
     };
 
     let mut desired_image_count = surface_capabilities.min_image_count + 1;
@@ -1131,17 +1181,10 @@ fn create_swapchain_khr(
         surface_capabilities.current_transform
     };
 
-    let composite_alpha = match surface_capabilities.supported_composite_alpha {
-        vk::CompositeAlphaFlagsKHR::OPAQUE
-        | vk::CompositeAlphaFlagsKHR::PRE_MULTIPLIED
-        | vk::CompositeAlphaFlagsKHR::POST_MULTIPLIED => {
-            surface_capabilities.supported_composite_alpha
-        }
-        _ => vk::CompositeAlphaFlagsKHR::INHERIT,
-    };
-
     let present_modes = unsafe {
-        surface_loader.get_physical_device_surface_present_modes(physical_device, surface)?
+        surface
+            .loader
+            .get_physical_device_surface_present_modes(physical_device, surface.khr)?
     };
     let present_mode = present_modes
         .iter()
@@ -1150,16 +1193,16 @@ fn create_swapchain_khr(
         .unwrap_or(vk::PresentModeKHR::FIFO);
 
     let mut swapchain_create_info = vk::SwapchainCreateInfoKHR::default()
-        .surface(surface)
+        .surface(surface.khr)
         .min_image_count(desired_image_count)
-        .image_format(surface_format.format)
-        .image_color_space(surface_format.color_space)
+        .image_format(surface.format.format)
+        .image_color_space(surface.format.color_space)
         .image_extent(surface_resolution)
         .image_array_layers(1)
         .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
         .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
         .pre_transform(pre_transform)
-        .composite_alpha(composite_alpha)
+        .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
         .present_mode(present_mode);
     if let Some(old_swapchain) = old_swapchain {
         swapchain_create_info.old_swapchain = old_swapchain;
@@ -1197,33 +1240,13 @@ fn create_image_view(
     Ok(unsafe { device.create_image_view(&create_view_info, None)? })
 }
 
-fn create_frame_buffer(
-    device: &Device,
-    render_pass: vk::RenderPass,
-    image_view: vk::ImageView,
-    width: u32,
-    height: u32,
-) -> anyhow::Result<vk::Framebuffer> {
-    let create_info = vk::FramebufferCreateInfo::default()
-        .render_pass(render_pass)
-        .attachments(std::slice::from_ref(&image_view))
-        .width(width)
-        .height(height)
-        .layers(1);
-    Ok(unsafe { device.create_framebuffer(&create_info, None)? })
-}
-
 fn create_swapchain_resources(
     device: &Device,
     swapchain_loader: &swapchain::Device,
     swapchain_khr: vk::SwapchainKHR,
-    render_pass: vk::RenderPass,
     surface_format: vk::SurfaceFormatKHR,
-    width: u32,
-    height: u32,
-) -> (Vec<vk::Image>, Vec<vk::ImageView>, Vec<vk::Framebuffer>) {
+) -> (Vec<vk::Image>, Vec<vk::ImageView>) {
     let mut swapchain_image_views = vec![];
-    let mut framebuffers = vec![];
     let swapchain_images = unsafe {
         swapchain_loader
             .get_swapchain_images(swapchain_khr)
@@ -1232,12 +1255,25 @@ fn create_swapchain_resources(
     for image in &swapchain_images {
         let image_view = create_image_view(device, surface_format.format, *image)
             .expect("Failed to create image view for swapchain image");
-        let fb = create_frame_buffer(device, render_pass, image_view, width, height)
-            .expect("Failed to create frame buffer");
         swapchain_image_views.push(image_view);
-        framebuffers.push(fb);
     }
-    (swapchain_images, swapchain_image_views, framebuffers)
+    (swapchain_images, swapchain_image_views)
+}
+
+fn create_framebuffer(
+    device: &Device,
+    render_pass: vk::RenderPass,
+    image_view: &vk::ImageView,
+    width: u32,
+    height: u32,
+) -> anyhow::Result<vk::Framebuffer> {
+    let create_info = vk::FramebufferCreateInfo::default()
+        .render_pass(render_pass)
+        .attachments(std::slice::from_ref(image_view))
+        .width(width)
+        .height(height)
+        .layers(1);
+    Ok(unsafe { device.create_framebuffer(&create_info, None)? })
 }
 
 fn create_command_pool(device: &Device, queue_family_index: u32) -> vk::CommandPool {
@@ -1249,7 +1285,11 @@ fn create_command_pool(device: &Device, queue_family_index: u32) -> vk::CommandP
 
 fn create_semaphore(device: &Device) -> anyhow::Result<vk::Semaphore> {
     let semaphore_create_info = vk::SemaphoreCreateInfo::default();
-    Ok(unsafe { device.create_semaphore(&semaphore_create_info, None)? })
+    unsafe {
+        device
+            .create_semaphore(&semaphore_create_info, None)
+            .context("Failed to create semaphore")
+    }
 }
 
 fn image_barrier<'a>(

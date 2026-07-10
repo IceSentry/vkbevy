@@ -51,6 +51,9 @@ pub struct MeshPipeline(pub Pipeline);
 #[derive(Resource, Deref)]
 pub struct MeshProgram(pub Program);
 
+#[derive(Resource)]
+pub struct DefaultRenderPass(pub vk::RenderPass);
+
 fn setup(
     mut commands: Commands,
     windows: Query<Entity, With<PrimaryWindow>>,
@@ -65,6 +68,17 @@ fn setup(
 
         let mut vk_bevy = VkBevyInstance::init(winit_window, PresentModeKHR::IMMEDIATE)
             .expect("Failed to initialize VkBevyInstance");
+
+        let render_pass = vk_bevy
+            .create_render_pass()
+            .expect("Failed to create render pass");
+
+        commands.insert_resource(DefaultRenderPass(render_pass));
+
+        println!("setup");
+
+        // TODO keep in a resource ?
+        vk_bevy.create_framebuffers(render_pass);
 
         let vertex_shader = vk_bevy.load_shader("assets/shaders/triangle.vert.glsl");
         let fragment_shader = vk_bevy.load_shader("assets/shaders/triangle.frag.glsl");
@@ -83,7 +97,7 @@ fn setup(
         let pipeline = vk_bevy
             .create_graphics_pipeline(
                 &pipeline_layout,
-                vk_bevy.render_pass,
+                render_pass,
                 &[vertex_shader.create_info(), fragment_shader.create_info()],
                 vk::PrimitiveTopology::TRIANGLE_LIST,
                 pipeline_rasterization_state_create_info,
@@ -154,7 +168,9 @@ fn update(
     meshes: Query<(&Mesh, &VertexBuffer, &IndexBuffer)>,
     mut frame_gpu_avg: Local<f64>,
     mut frame_cpu_avg: Local<f64>,
+    default_render_pass: Res<DefaultRenderPass>,
 ) {
+    // info!("begin");
     let begin_frame = Instant::now();
 
     let mut window = windows.single_mut().unwrap();
@@ -179,7 +195,7 @@ fn update(
         },
     };
     let render_pass_begin_info = vk::RenderPassBeginInfo::default()
-        .render_pass(vk_bevy.render_pass)
+        .render_pass(default_render_pass.0)
         .framebuffer(vk_bevy.framebuffers[image_index as usize])
         .render_area(vk::Rect2D::default().extent(vk::Extent2D {
             width: vk_bevy.swapchain_width,
@@ -244,6 +260,7 @@ fn resize(
     windows: Query<&Window>,
     mut events: MessageReader<WindowResized>,
     mut vk_bevy: ResMut<VkBevyInstance>,
+    default_render_pass: Res<DefaultRenderPass>,
 ) {
     for event in events.read() {
         if let Ok(window) = windows.get(event.window) {
@@ -255,6 +272,7 @@ fn resize(
             if width != vk_bevy.swapchain_width || height != vk_bevy.swapchain_height {
                 // FIXME: this will break with multiple windows
                 vk_bevy.recreate_swapchain(width, height);
+                vk_bevy.create_framebuffers(default_render_pass.0);
             }
         }
     }
